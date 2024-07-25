@@ -1,100 +1,86 @@
-import socket
 import threading
-import sqlite3
+import socket
+import argparse
 import os
 
-# Ensure the data directory exists
-data_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data'))
-os.makedirs(data_dir, exist_ok=True)
+class ChatServer(threading.Thread):
+    def __init__(self, host, port):
+        super().__init__()
+        self.connections = []
+        self.host = host
+        self.port = port
 
-# Construct the absolute path for the database file
-db_path = os.path.join(data_dir, 'chat_logs.db')
+    def run(self):
+        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server_socket.bind((self.host, self.port))
+        server_socket.listen(1)
+        print(f"Server listening on {self.host}:{self.port}")
 
-# Debugging: Print the database path to verify it
-print(f"Database path: {db_path}")
+        while True:
+            client_socket, client_address = server_socket.accept()
+            print(f"New connection from {client_address}")
 
-# Database setup
-try:
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY, username TEXT, message TEXT)''')
-    conn.commit()
-    print("Database connected and table created successfully.")
-except sqlite3.Error as e:
-    print(f"Database error: {e}")
-    conn = None
+            client_handler = ClientHandler(client_socket, client_address, self)
+            client_handler.start()
 
-# Server setup
-server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-server.bind(('localhost', 5555))
-server.listen()
+            self.connections.append(client_handler)
+            print(f"Connection ready for {client_address}")
 
-clients = []
-usernames = []
+    def broadcast(self, message, source):
+        for connection in self.connections:
+            if connection.address != source:
+                connection.send_message(message)
 
-def broadcast(message, client):
-    for cl in clients:
-        if cl != client:
+    def remove_connection(self, connection):
+        self.connections.remove(connection)
+
+class ClientHandler(threading.Thread):
+    def __init__(self, client_socket, client_address, server):
+        super().__init__()
+        self.client_socket = client_socket
+        self.address = client_address
+        self.server = server
+
+    def run(self):
+        while True:
             try:
-                cl.send(message)
-            except socket.error as e:
-                print(f"Error sending message to {cl}: {e}")
-                clients.remove(cl)
-                cl.close()
+                message = self.client_socket.recv(1024).decode('utf-8')
+                if message:
+                    print(f"{self.address} says: {message}")
+                    self.server.broadcast(message, self.address)
+                else:
+                    print(f"{self.address} has disconnected")
+                    self.client_socket.close()
+                    self.server.remove_connection(self)
+                    return
+            except ConnectionResetError:
+                print(f"{self.address} connection reset")
+                self.client_socket.close()
+                self.server.remove_connection(self)
+                return
 
-def handle_client(client):
+    def send_message(self, message):
+        self.client_socket.sendall(message.encode('utf-8'))
+
+def shutdown_server(server):
     while True:
-        try:
-            message = client.recv(1024)
-            if not message:
-                break
-            broadcast(message, client)
-            
-            # Save message to database
-            try:
-                username, msg = message.decode().split(": ", 1)
-                if conn:
-                    c.execute("INSERT INTO messages (username, message) VALUES (?, ?)", (username, msg))
-                    conn.commit()
-            except sqlite3.Error as e:
-                print(f"Database error: {e}")
-            except ValueError:
-                print("Message format error")
-        except socket.error as e:
-            print(f"Socket error: {e}")
-            break
+        command = input("")
+        if command.lower() == "quit":
+            print("Shutting down server...")
+            for connection in server.connections:
+                connection.client_socket.close()
+            os._exit(0)
 
-    remove_client(client)
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Chat Server")
+    parser.add_argument('host', help='Server host address')
+    parser.add_argument('-p', '--port', type=int, default=12345, help='Server port (default 12345)')
 
-def remove_client(client):
-    if client in clients:
-        index = clients.index(client)
-        username = usernames[index]
-        clients.remove(client)
-        usernames.remove(username)
-        broadcast(f'{username} left the chat!'.encode('utf-8'), client)
-        client.close()
-        print(f"{username} has been removed and socket closed.")
+    args = parser.parse_args()
 
-def receive():
-    while True:
-        try:
-            client, address = server.accept()
-            print(f"Connected with {str(address)}")
+    server = ChatServer(args.host, args.port)
+    server.start()
 
-            client.send('USERNAME'.encode('utf-8'))
-            username = client.recv(1024).decode('utf-8')
-            usernames.append(username)
-            clients.append(client)
-
-            print(f"Username of the client is {username}")
-            broadcast(f"{username} joined the chat!".encode('utf-8'), client)
-            client.send("Connected to the server!".encode('utf-8'))
-
-            thread = threading.Thread(target=handle_client, args=(client,))
-            thread.start()
-        except socket.error as e:
-            print(f"Socket error during accept: {e}")
-
-print("Server is listening...")
-receive()
+    shutdown_thread = threading.Thread(target=shutdown_server, args=(server,))
+    shutdown_thread.start()
