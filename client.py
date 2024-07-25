@@ -1,127 +1,139 @@
-import socket
 import threading
-import tkinter
-from tkinter import simpledialog, filedialog, messagebox
-import emoji
+import socket
+import argparse
 import os
+import sys
+import tkinter as tk
+import random
+import string
 
-HOST = 'localhost'
-PORT = 5555
+class Send(threading.Thread):
+    def __init__(self, sock, name):
+        super().__init__()
+        self.sock = sock
+        self.name = name
+
+    def run(self):
+        while True:
+            print('{}: '.format(self.name), end='')
+            sys.stdout.flush()
+            message = sys.stdin.readline()[:-1]
+            if message == "QUIT":
+                self.sock.sendall('Server: {} has left the chat.'.format(self.name).encode('ascii'))
+                break
+            else:
+                self.sock.sendall('{}: {}'.format(self.name, message).encode('ascii'))
+        print('\nQuitting...')
+        self.sock.close()
+        os._exit(0)
+
+class Receive(threading.Thread):
+    def __init__(self, sock, name):
+        super().__init__()
+        self.sock = sock
+        self.name = name
+        self.messages = None
+
+    def run(self):
+        while True:
+            message = self.sock.recv(1024).decode('ascii')
+            if self.messages:
+                self.messages.insert(tk.END, message)
+                print('\r{}\n{}:'.format(message, self.name), end='')
+            else:
+                print('\r{}\n{}:'.format(message, self.name), end='')
 
 class Client:
-    def __init__(self, master):
-        self.master = master
-        self.master.title("Chat Application")
-        self.socket = None  
+    def __init__(self, host, port):
+        self.host = host
+        self.port = port
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.name = None
+        self.messages = None
 
-        try:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.connect((HOST, PORT))
-        except Exception as e:
-            messagebox.showerror("Connection Error", f"Failed to connect to server: {e}")
-            self.master.destroy()
-            return
+    def start(self):
+        print('Trying to connect to {}:{}...'.format(self.host, self.port))
+        self.sock.connect((self.host, self.port))
+        print('Successfully connected to {}:{}'.format(self.host, self.port))
+        print()
 
-        self.username_prompt()
-        self.gui_setup()
+        if not self.name:
+            self.name = input('Your name (leave blank for random): ')
+            if not self.name:
+                self.name = self.generate_random_name()
+        print()
+        print('Welcome, {}! Getting ready to send and receive messages...'.format(self.name))
 
-        self.receive_thread = threading.Thread(target=self.receive)
-        self.receive_thread.start()
+        send = Send(self.sock, self.name)
+        receive = Receive(self.sock, self.name)
+        send.start()
+        receive.start()
 
-    def username_prompt(self):
-        self.username = simpledialog.askstring("Username", "Please choose a username", parent=self.master)
-        if self.username:
-            try:
-                self.socket.send(self.username.encode('utf-8'))
-            except Exception as e:
-                messagebox.showerror("Send Error", f"Failed to send username: {e}")
-                self.master.destroy()
+        self.sock.sendall('Server: {} has joined the chat. Say what\'s up!'.format(self.name).encode('ascii'))
+        print("\rReady! Leave the chatroom anytime by typing 'QUIT'\n")
+        print('{}: '.format(self.name), end='')
 
-    def gui_setup(self):
-        self.text_area = tkinter.Text(self.master, wrap='word', font=('Arial', 12))
-        self.text_area.pack(padx=20, pady=5)
+        return receive
 
-        self.input_frame = tkinter.Frame(self.master)
-        self.input_frame.pack(padx=20, pady=5)
+    def send(self, textInput):
+        message = textInput.get()
+        textInput.delete(0, tk.END)
+        self.messages.insert(tk.END, '{}: {}'.format(self.name, message))
+        if message == "QUIT":
+            self.sock.sendall('Server: {} has left the chat.'.format(self.name).encode('ascii'))
+            print('\nQuitting...')
+            self.sock.close()
+            os._exit(0)
+        else:
+            self.sock.sendall('{}: {}'.format(self.name, message).encode('ascii'))
 
-        self.input_area = tkinter.Entry(self.input_frame, width=50, font=('Arial', 12))
-        self.input_area.grid(row=0, column=0, padx=5, pady=5)
-        self.input_area.bind("<Return>", self.write)
+    @staticmethod
+    def generate_random_name(length=8):
+        letters = string.ascii_letters
+        return ''.join(random.choice(letters) for _ in range(length))
 
-        self.send_button = tkinter.Button(self.input_frame, text="Send", command=self.write_button, font=('Arial', 12))
-        self.send_button.grid(row=0, column=1, padx=5, pady=5)
+def main(host, port):
+    client = Client(host, port)
+    receive = client.start()
 
-        self.emoji_button = tkinter.Button(self.input_frame, text="😀", command=self.send_emoji, font=('Arial', 12))
-        self.emoji_button.grid(row=0, column=2, padx=5, pady=5)
+    window = tk.Tk()
+    window.title("Desktop Chat Application")
 
-        self.attach_button = tkinter.Button(self.input_frame, text="Attach", command=self.attach_file, font=('Arial', 12))
-        self.attach_button.grid(row=0, column=3, padx=5, pady=5)
+    fromMessage = tk.Frame(master=window)
+    scrollbar = tk.Scrollbar(master=fromMessage)
+    messages = tk.Listbox(master=fromMessage, yscrollcommand=scrollbar.set)
+    scrollbar.pack(side=tk.RIGHT, fill=tk.Y, expand=False)
+    messages.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-    def send_emoji(self):
-        emoji_window = tkinter.Toplevel(self.master)
-        emoji_window.title("Select Emoji")
+    client.messages = messages
+    receive.messages = messages
 
-        emojis = ["😀", "😂", "😍", "😭", "😠", "😎", "👍", "🙏"]
+    fromMessage.grid(row=0, column=0, columnspan=2, sticky="nsew")
+    fromEntry = tk.Frame(master=window)
+    textInput = tk.Entry(master=fromEntry)
 
-        for em in emojis:
-            button = tkinter.Button(emoji_window, text=em, command=lambda em=em: self.add_emoji(em, emoji_window), font=('Arial', 12))
-            button.pack(side=tkinter.LEFT, padx=5, pady=5)
+    textInput.pack(fill=tk.BOTH, expand=True)
+    textInput.bind("<Return>", lambda x: client.send(textInput))
+    textInput.insert(0, "Write your message here.")
 
-    def add_emoji(self, em, emoji_window):
-        self.input_area.insert(tkinter.END, em)
-        emoji_window.destroy()
+    Sendbtn = tk.Button(
+        master=window,
+        text='Send',
+        command=lambda: client.send(textInput))
 
-    def write(self, event=None):
-        self.send_message()
+    fromEntry.grid(row=1, column=0, padx=10, sticky="ew")
+    Sendbtn.grid(row=1, column=1, padx=10, sticky="ew")
 
-    def write_button(self):
-        self.send_message()
+    window.rowconfigure(0, minsize=500, weight=1)
+    window.rowconfigure(1, minsize=50, weight=0)
+    window.columnconfigure(0, minsize=500, weight=1)
+    window.columnconfigure(1, minsize=200, weight=0)
 
-    def send_message(self):
-        message = self.input_area.get()
-        if message.strip():  
-            try:
-                if self.socket:
-                    self.socket.send(message.encode('utf-8'))
-                else:
-                    messagebox.showerror("Send Error", "Socket is not connected.")
-            except socket.error as e:
-                messagebox.showerror("Send Error", f"Failed to send message: {e}")
-                return
+    window.mainloop()
 
-            self.input_area.delete(0, tkinter.END)
-
-    def receive(self):
-        while True:
-            try:
-                if self.socket:
-                    message = self.socket.recv(1024).decode('utf-8')
-                    if not message:
-                        break  
-                    self.text_area.insert(tkinter.END, message + "\n")
-            except socket.error as e:
-                messagebox.showerror("Receive Error", f"Error receiving message: {e}")
-                break
-
-        if self.socket:
-            self.socket.close()
-
-    def attach_file(self):
-        file_path = filedialog.askopenfilename()
-        if file_path:
-            try:
-                filename = os.path.basename(file_path)
-                with open(file_path, 'rb') as file:
-                    file_data = file.read()
-
-                if self.socket:
-                    self.socket.send(f"{self.username}: [File: {filename}]".encode('utf-8'))
-                    self.socket.send(file_data)
-                else:
-                    messagebox.showerror("Error", "Socket is not connected.")
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to attach file: {e}")
-
-root = tkinter.Tk()
-client = Client(root)
-root.mainloop()
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="Chatroom Client")
+    parser.add_argument('host', help='Interface the client connects to')
+    parser.add_argument('-p', metavar='PORT', type=int, default=12345, help='TCP port (default 12345)')
+    args = parser.parse_args()
+    main(args.host, args.p)
